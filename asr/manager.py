@@ -211,6 +211,9 @@ class ASRManager:
             ASRManager.MICROPHONE_DEVICE_INDEX = _configured_mic_index()
         self._mic_index: Optional[int] = ASRManager.MICROPHONE_DEVICE_INDEX
         self._init_lock = threading.Lock()
+        self._listen_guard = threading.Lock()
+        self._listen_state_lock = threading.Lock()
+        self._active_listen_cancel: threading.Event | None = None
         # 可选：外部注入的 TTS 播放状态查询函数，返回 True 表示 TTS 正在播放
         # 播放期间暂停 pre-roll 写入，避免将 TTS 输出混入 ASR 输入
         self._tts_playing_fn = None
@@ -242,12 +245,20 @@ class ASRManager:
         ).start()
 
     def close(self) -> None:
+        self.cancel_listening()
         try:
             close = getattr(self._backend, "close", None)
             if callable(close):
                 close()
         except Exception:
             pass
+
+    def cancel_listening(self) -> None:
+        """Request cancellation of the current blocking microphone capture."""
+        with self._listen_state_lock:
+            cancel_event = self._active_listen_cancel
+        if cancel_event is not None:
+            cancel_event.set()
 
     # ------------------------------------------------------------------
     # 初始化
@@ -416,25 +427,53 @@ class ASRManager:
 
     def listen_for_speech(self, max_retries: int = 2) -> Optional[str]:
         """监听语音并返回识别文本；无有效输入返回 None。"""
-        # 后端尚未就绪时等待（最多 120s），不阻塞主进程启动
-        if not self._backend_ready.is_set():
-            logger.info("[ASR] backend is loading; waiting for readiness...")
-            if not self._backend_ready.wait(timeout=120.0):
-                logger.error("[ASR] backend startup timed out; skipping this recognition attempt")
-                return None
-        if self._backend_load_err:
-            logger.error(f"[ASR] backend unavailable: {self._backend_load_err}")
+        # Silero keeps recurrent tensors on the model object. Concurrent calls
+        # can corrupt that shared state at native TorchScript level, so the
+        # manager owns the single-listener invariant even if a caller regresses.
+        if not self._listen_guard.acquire(blocking=False):
+            logger.warning("[ASR] overlapping listen request rejected")
             return None
 
-        logger.info("[ASR] listening started")
-        for attempt in range(max_retries + 1):
-            result = self._listen_once(listen_timeout_attempt=attempt)
-            if result:
-                return result
-            if attempt < max_retries:
-                logger.debug(f"[ASR] attempt {attempt + 1} recognized no speech; retrying...")
-        logger.info("[ASR] no speech recognized after all attempts")
-        return None
+        cancel_event = threading.Event()
+        with self._listen_state_lock:
+            self._active_listen_cancel = cancel_event
+        try:
+            # 后端尚未就绪时等待（最多 120s），同时允许 stop 及时退出。
+            if not self._backend_ready.is_set():
+                logger.info("[ASR] backend is loading; waiting for readiness...")
+                deadline = time.monotonic() + 120.0
+                while not self._backend_ready.is_set() and not cancel_event.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        logger.error("[ASR] backend startup timed out; skipping this recognition attempt")
+                        return None
+                    self._backend_ready.wait(timeout=min(0.1, remaining))
+            if cancel_event.is_set():
+                return None
+            if self._backend_load_err:
+                logger.error(f"[ASR] backend unavailable: {self._backend_load_err}")
+                return None
+
+            logger.info("[ASR] listening started")
+            for attempt in range(max_retries + 1):
+                if cancel_event.is_set():
+                    return None
+                result = self._listen_once(
+                    listen_timeout_attempt=attempt,
+                    cancel_event=cancel_event,
+                )
+                if result:
+                    return result
+                if attempt < max_retries and not cancel_event.is_set():
+                    logger.debug(f"[ASR] attempt {attempt + 1} recognized no speech; retrying...")
+            if not cancel_event.is_set():
+                logger.info("[ASR] no speech recognized after all attempts")
+            return None
+        finally:
+            with self._listen_state_lock:
+                if self._active_listen_cancel is cancel_event:
+                    self._active_listen_cancel = None
+            self._listen_guard.release()
 
     def set_language(self, language_code: str) -> None:
         """Set the conversation recognizer language when supported."""
@@ -493,7 +532,12 @@ class ASRManager:
     # 内部实现
     # ------------------------------------------------------------------
 
-    def _listen_once(self, *, listen_timeout_attempt: int = 0) -> Optional[str]:
+    def _listen_once(
+        self,
+        *,
+        listen_timeout_attempt: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> Optional[str]:
         def _should_block_mic() -> bool:
             try:
                 if self._tts_block_mic_fn is not None and self._tts_block_mic_fn():
@@ -505,7 +549,11 @@ class ASRManager:
             return False
 
         mic_service = get_mic_input_service()
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         mic_service.start(preferred_index=self._mic_index)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         speculative = (
             _SpeculativeTranscription(
                 self._backend, self.context, _SAMPLE_RATE,
@@ -543,14 +591,19 @@ class ASRManager:
             probable_end_silence_ms=_SPECULATIVE_END_MS if speculative is not None else 0,
             on_probable_end=speculative.submit if speculative is not None else None,
             on_probable_end_cancelled=speculative.invalidate if speculative is not None else None,
+            cancel_event=cancel_event,
         )
         self._mic_index = mic_service.mic_index
         if audio is None:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             msg = "[ASR] listen timed out; no speech detected"
             if listen_timeout_attempt <= 0:
                 logger.info(msg)
             else:
                 logger.debug(msg)
+            return None
+        if cancel_event is not None and cancel_event.is_set():
             return None
         # 两段式端点：短静音阶段的投机转写命中时直接复用，隐藏转写延迟
         text = speculative.consume(audio) if speculative is not None else None

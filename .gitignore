@@ -19,9 +19,13 @@ vts_auth_token.json
 # ── Python 虚拟环境 ─────────────────────────────────────────────────────────
 .venv/
 .venv_*/
+.venv-*/
 .venv1/
 venv/
 env/
+
+# Local Codex desktop environment state
+.codex/
 ENV/
 
 # ── Python 编译产物 ─────────────────────────────────────────────────────────

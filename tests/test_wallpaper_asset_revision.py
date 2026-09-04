@@ -113,7 +113,11 @@ def test_electron_slice_assets_reuse_the_wallpaper_surface_without_a_second_ui()
     electron_tsconfig = (_PROJECT_ROOT / "electron" / "tsconfig.json").read_text(encoding="utf-8")
     desktop_layer = (_PROJECT_ROOT / "wallpaper" / "windows_desktop_layer.py").read_text(encoding="utf-8")
     wallpaper_scene = (_PROJECT_ROOT / "render" / "web" / "wallpaper_scene.js").read_text(encoding="utf-8")
+    renderer = (_PROJECT_ROOT / "render" / "web" / "renderer.js").read_text(encoding="utf-8")
     lively = (_PROJECT_ROOT / "wallpaper" / "lively" / "index.html").read_text(encoding="utf-8")
+    canvas_lifecycle = (
+        _PROJECT_ROOT / "electron" / "src" / "main" / "wallpaperCanvasLifecycle.ts"
+    ).read_text(encoding="utf-8")
 
     assert '<html lang="en">' in html
     assert '<script src="/render/web/crt_canvas_surface.js"></script>' in html
@@ -130,6 +134,8 @@ def test_electron_slice_assets_reuse_the_wallpaper_surface_without_a_second_ui()
     assert "surface.setAttention" in host
     assert "setPresentation(profile)" in surface
     assert "setAttention(payload)" in surface
+    assert 'const hasIncomingContent = Object.keys(data).some((key) => !["action", "visible"].includes(key));' in surface
+    assert "else if (data.visible === true || hasIncomingContent) state.expanded = true;" in surface
     assert 'postCanvasAction("attention", "resolve"' in surface
     assert 'postCanvasAction("attention", "presented"' in surface
     assert 'presentationLocale: "en-US"' in surface
@@ -170,7 +176,40 @@ def test_electron_slice_assets_reuse_the_wallpaper_surface_without_a_second_ui()
     assert "openAuipApp" not in slice_preload
     assert "def find_wallpaper_parent" in desktop_layer
     assert "if (this._externalCanvasHost) return;" in wallpaper_scene
+    assert "setCanvasPresentation(profile) { desktopScene.setCanvasPresentation(profile || {}); }" in wallpaper_scene
+    assert "setAttention(payload) { desktopScene.setAttention(payload || {}); }" in wallpaper_scene
+    assert 'const pixiApp = callRender("getPixiApp", []);' in wallpaper_scene
+    bridge_client = (_PROJECT_ROOT / "render" / "web" / "wallpaper_engine_bridge.js").read_text(encoding="utf-8")
+    assert 'pixiApp.ticker.maxFPS = requested;' in bridge_client
+    assert 'mode: active ? "active" : "idle"' in bridge_client
+    assert 'setInterval(function () { refreshFrameBudget("timer"); }, 500);' in bridge_client
+    assert 'queryFlagEnabled("spriteLazyLoad")' in renderer
+    assert 'if (this._lazyFrameSetWarmup) return 0;' in renderer
+    assert 'if (this._lazyFrameSetWarmup && priority === "ambient") return;' in renderer
+    assert "prefersWarmAutoTransitions()" in renderer
+    assert "return edge.to === fromId || (label && this.sprite.isFrameSetWarm(label));" in renderer
+    assert "query.set('sliceHost', 'electron')" in main
+    assert "new WallpaperCanvasLifecycle<BrowserWindow>" in main
+    assert "createElectronCanvasWindow(bridge, bridgeKey)" in main
+    assert "screen.getCursorScreenPoint()" in main
+    assert "wallpaperShapeSender(" in main
+    assert "electronCanvasLifecycle.reloadRenderer()" in main
+    assert "rendererLoadPending" in canvas_lifecycle
+    assert "this.pointHitsWindowRegions(" in canvas_lifecycle
+    assert "[electron-canvas] renderer hit regions committed" in main
     assert 'if (info.sliceHost === "electron") sliceHost = "electron";' in lively
+
+
+def test_macos_secondary_displays_use_static_backdrops() -> None:
+    main = (_PROJECT_ROOT / "electron" / "src" / "main" / "index.ts").read_text(encoding="utf-8")
+    backdrop = (_PROJECT_ROOT / "render" / "web" / "electron_backdrop.html").read_text(encoding="utf-8")
+
+    assert "const electronBackdropWindows = new Map<number, BrowserWindow>()" in main
+    assert "screen.getAllDisplays().filter(display => display.id !== primaryDisplayId)" in main
+    assert "createElectronBackdropWindow(display, electronSliceBridge)" in main
+    assert "syncElectronBackdropWindows()" in main
+    assert "/assets/images/amadeus_desktop_wallpaper.png" in backdrop
+    assert "<script" not in backdrop
 
 
 def test_shared_canvas_and_slice_host_are_javascript_syntax_valid() -> None:

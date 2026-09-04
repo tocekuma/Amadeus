@@ -23,6 +23,7 @@ class AsrHandler(RequestHandler):
         self._asr_manager = None
         self._asr_manager_factory: Callable[[], Any] | None = None
         self._init_lock: asyncio.Lock | None = None
+        self._lifecycle_lock: asyncio.Lock | None = None
         self._listen_task: asyncio.Task | None = None
         self._unload_task: asyncio.Task | None = None
         self._on_unload: Callable[[Any], None] | None = None
@@ -112,48 +113,54 @@ class AsrHandler(RequestHandler):
     async def _start(self, params: dict[str, Any]) -> dict[str, Any]:
         return await self.start_listening(params)
 
+    def _get_lifecycle_lock(self) -> asyncio.Lock:
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        return self._lifecycle_lock
+
     async def start_listening(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        params = params or {}
-        if self._active:
-            requested_source = str(params.get("source") or "")
-            if requested_source and requested_source == self._source:
-                self._source_payload = dict(params.get("source_payload") or params.get("sourcePayload") or self._source_payload)
-                if requested_source == "wake":
+        async with self._get_lifecycle_lock():
+            params = params or {}
+            if self._active:
+                requested_source = str(params.get("source") or "")
+                if requested_source and requested_source == self._source:
+                    self._source_payload = dict(params.get("source_payload") or params.get("sourcePayload") or self._source_payload)
+                    if requested_source == "wake":
+                        self._wake_payload = dict(params.get("wake") or {})
+                        self._arm_awake(params)
+                        await self._emit_listening_status()
+                        return {"status": "awake", "awake_seconds": self._awake_seconds}
+                    await self._emit_listening_status()
+                    return {"status": "listening", "source": self._source}
+                if str(params.get("source") or "") == "wake":
+                    self._source = "wake"
                     self._wake_payload = dict(params.get("wake") or {})
+                    self._source_payload = dict(params.get("source_payload") or params.get("sourcePayload") or {})
                     self._arm_awake(params)
                     await self._emit_listening_status()
                     return {"status": "awake", "awake_seconds": self._awake_seconds}
-                await self._emit_listening_status()
-                return {"status": "listening", "source": self._source}
-            if str(params.get("source") or "") == "wake":
-                self._source = "wake"
-                self._wake_payload = dict(params.get("wake") or {})
-                self._source_payload = dict(params.get("source_payload") or params.get("sourcePayload") or {})
-                self._arm_awake(params)
-                await self._emit_listening_status()
-                return {"status": "awake", "awake_seconds": self._awake_seconds}
-            return {"status": "already_listening"}
-        try:
-            asr_manager = await self._ensure_asr_manager()
-        except Exception as exc:
-            logger.exception("asr lazy init failed")
-            await bus.emit(Method.ASR_STATUS, {"status": "error", "error": str(exc)})
-            return {"status": "error", "error": str(exc)}
-        if asr_manager is None:
-            return {"status": "error", "error": "ASR manager unavailable"}
-        self._active = True
-        self._one_shot = bool(params.get("one_shot", False))
-        self._source = str(params.get("source") or "")
-        self._wake_payload = dict(params.get("wake") or {})
-        self._source_payload = dict(params.get("source_payload") or params.get("sourcePayload") or {})
-        self._finish_after_turn_complete = bool(
-            params.get("finish_after_turn_complete", self._source == "wake")
-        )
-        self._arm_awake(params)
-        self._ready_callback_sent = False
-        await self._emit_listening_status()
-        self._listen_task = asyncio.create_task(self._listen_loop())
-        return {"status": "awake" if self._is_awake_session() else "listening"}
+                return {"status": "already_listening"}
+            try:
+                asr_manager = await self._ensure_asr_manager()
+            except Exception as exc:
+                logger.exception("asr lazy init failed")
+                await bus.emit(Method.ASR_STATUS, {"status": "error", "error": str(exc)})
+                return {"status": "error", "error": str(exc)}
+            if asr_manager is None:
+                return {"status": "error", "error": "ASR manager unavailable"}
+            self._active = True
+            self._one_shot = bool(params.get("one_shot", False))
+            self._source = str(params.get("source") or "")
+            self._wake_payload = dict(params.get("wake") or {})
+            self._source_payload = dict(params.get("source_payload") or params.get("sourcePayload") or {})
+            self._finish_after_turn_complete = bool(
+                params.get("finish_after_turn_complete", self._source == "wake")
+            )
+            self._arm_awake(params)
+            self._ready_callback_sent = False
+            await self._emit_listening_status()
+            self._listen_task = asyncio.create_task(self._listen_loop())
+            return {"status": "awake" if self._is_awake_session() else "listening"}
 
     async def _stop(self, params: dict[str, Any]) -> dict[str, Any]:
         expected_source = str((params or {}).get("source") or "")
@@ -162,13 +169,22 @@ class AsrHandler(RequestHandler):
         return await self.stop_listening()
 
     async def stop_listening(self) -> dict[str, Any]:
-        self._active = False
-        self._one_shot = False
-        if self._listen_task:
-            self._listen_task.cancel()
+        async with self._get_lifecycle_lock():
+            self._active = False
+            self._one_shot = False
+            manager = self._asr_manager
+            cancel = getattr(manager, "cancel_listening", None) if manager is not None else None
+            if callable(cancel):
+                cancel()
+            listen_task = self._listen_task
             self._listen_task = None
-        await self._finish_listening("manual_stop")
-        return {"status": "stopped"}
+            if listen_task is not None and listen_task is not asyncio.current_task():
+                # asyncio Task cancellation cannot stop an asyncio.to_thread
+                # worker. Ask the manager to end capture, then join the task so
+                # a later start cannot overlap the stateful Silero model.
+                await listen_task
+            await self._finish_listening("manual_stop")
+            return {"status": "stopped"}
 
     def _arm_awake(self, params: dict[str, Any]) -> None:
         awake_seconds = float(params.get("awake_seconds") or 0.0)

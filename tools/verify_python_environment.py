@@ -56,6 +56,7 @@ PROFILE_TIER_IMPORTS: dict[str, tuple[str, ...]] = {
     "ci": (),
     "voice": VOICE_IMPORTS,
     "vad": (*VOICE_IMPORTS, *VAD_IMPORTS),
+    "macos-voice": (*VOICE_IMPORTS, *VAD_IMPORTS, *LOCAL_MODEL_IMPORTS, *CU124_IMPORTS),
     "cu124": (*VOICE_IMPORTS, *VAD_IMPORTS, *LOCAL_MODEL_IMPORTS, *CU124_IMPORTS),
 }
 
@@ -73,9 +74,19 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def verify(profile: str, *, require_cuda_device: bool = False) -> None:
+def verify(
+    profile: str,
+    *,
+    require_cuda_device: bool = False,
+    require_mps_device: bool = False,
+) -> None:
     _require(sys.version_info[:2] == (3, 12), "CPython 3.12 is required")
-    _require(platform.system() == "Windows", "the release profiles target Windows")
+    if profile == "macos-voice":
+        _require(platform.system() == "Darwin", "the macos-voice profile targets macOS")
+        _require(platform.machine() == "arm64", "the macos-voice profile targets Apple Silicon")
+        os.environ.setdefault("TTS_DEVICE", "cpu")
+    else:
+        _require(platform.system() == "Windows", "the release profiles target Windows")
 
     if profile in {"cpu", "ci"}:
         os.environ.setdefault("TTS_DEVICE", "cpu")
@@ -110,6 +121,27 @@ def verify(profile: str, *, require_cuda_device: bool = False) -> None:
         if require_cuda_device:
             _require(torch.cuda.is_available(), "no usable CUDA device was detected")
         torch_summary = f" torch={torch.__version__} torchaudio={torchaudio.__version__}"
+    elif profile == "macos-voice":
+        import torch
+        import torchaudio
+
+        _require(
+            str(torch.__version__).startswith("2.6.0"),
+            f"expected torch 2.6.0, found {torch.__version__}",
+        )
+        _require(
+            str(torchaudio.__version__).startswith("2.6.0"),
+            f"expected torchaudio 2.6.0, found {torchaudio.__version__}",
+        )
+        mps_built = bool(torch.backends.mps.is_built())
+        mps_available = bool(torch.backends.mps.is_available())
+        _require(mps_built, "this PyTorch build does not include MPS support")
+        if require_mps_device:
+            _require(mps_available, "no usable MPS device was detected")
+        torch_summary = (
+            f" torch={torch.__version__} torchaudio={torchaudio.__version__}"
+            f" mps_built={mps_built} mps_available={mps_available}"
+        )
     else:
         torch_summary = ""
 
@@ -133,8 +165,17 @@ def main() -> int:
         action="store_true",
         help="also require torch.cuda.is_available() for the cu124 profile",
     )
+    parser.add_argument(
+        "--require-mps-device",
+        action="store_true",
+        help="also require torch.backends.mps.is_available() for the macos-voice profile",
+    )
     args = parser.parse_args()
-    verify(args.profile, require_cuda_device=args.require_cuda_device)
+    verify(
+        args.profile,
+        require_cuda_device=args.require_cuda_device,
+        require_mps_device=args.require_mps_device,
+    )
     return 0
 
 

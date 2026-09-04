@@ -35,6 +35,7 @@ from config.settings import (
     TTS_REF_AUDIO_EN,
     TTS_REF_TEXT_EN,
     TTS_RTF_INITIAL,
+    TTS_DEVICE,
 )
 from tools.text_utils import (
     _compute_text_sha1,
@@ -493,6 +494,7 @@ def get_sovits_params(text: str, is_first_sentence: bool = False):
     """
     length = len(text.strip())
     cuda_graph_enabled = os.environ.get("ENABLE_CUDA_GRAPH", "0") == "1"
+    mps_enabled = str(TTS_DEVICE).lower().startswith("mps")
 
     if is_first_sentence:
         max_sec_override = max(3.5, min(8.0, length * 0.25 or 3.5))
@@ -520,7 +522,7 @@ def get_sovits_params(text: str, is_first_sentence: bool = False):
             "top_k": 5,
             "top_p": 1,
             "temperature": 0.6,
-            "sample_steps": 16,
+            "sample_steps": 8 if mps_enabled else 16,
             "if_sr": False,
             "how_to_cut": "不切",
             "speed": 1,
@@ -536,7 +538,7 @@ def get_sovits_params(text: str, is_first_sentence: bool = False):
         "top_k": 5,
         "top_p": 1,
         "temperature": 0.6,
-        "sample_steps": 32,
+        "sample_steps": 8 if mps_enabled else 32,
         "if_sr": False,
         "how_to_cut": "凑四句一切",
         "speed": 1,

@@ -29,7 +29,7 @@ copy continues to live below `assets/`.
 | `visual-runtime` | ambient/subtitle images, scenario runtime, keyboard SFX | Optional wallpaper effects and activities |
 | `character-kurisu` | `spriteforge/runtime/kurisu/` | Optional manifest-indexed KTX2 animation |
 | `asr-qwen3-0.6b` | `models/asr/qwen3-asr-0.6b/` | Offline Qwen3-ASR conversation model |
-| `voice-kurisu-gpt-sovits-v3` | GPT-SoVITS v3 runtime weights and reference audio | Optional embedded Kurisu voice |
+| `voice-kurisu-gpt-sovits-v3` | GPT-SoVITS v3 runtime weights and Japanese reference audio | Optional embedded Kurisu voice; English reference audio is configured separately |
 
 All packs are optional at application startup. Without them, the built-in
 wallpaper, text Chat, Work, and headless startup remain available; Settings

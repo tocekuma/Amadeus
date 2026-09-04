@@ -17,6 +17,8 @@ export default function BackendPage({ send, subscribe, connected, renderActive, 
   const [renderStatus, setRenderStatus] = useState('')
   const [wallpaperStatus, setWallpaperStatus] = useState('')
   const [actionsDisabled, setActionsDisabled] = useState(false)
+  const [restarting, setRestarting] = useState(false)
+  const [restartStatus, setRestartStatus] = useState('')
   const logEndRef = useRef<HTMLDivElement>(null)
 
   // Subscribe to system status
@@ -65,6 +67,21 @@ export default function BackendPage({ send, subscribe, connected, renderActive, 
   }, [send, fetchLog])
 
   const statusColor = connected ? '#107C10' : '#C42B1C'
+
+  const restartBackend = useCallback(async () => {
+    if (!window.amadeus || restarting) return
+    setRestarting(true)
+    setRestartStatus('Restarting backend…')
+    try {
+      const ok = await window.amadeus.restartBackend()
+      if (!ok) throw new Error('Backend restart failed')
+      setRestartStatus('Backend restarted. Reconnecting…')
+    } catch (reason) {
+      setRestartStatus(reason instanceof Error ? reason.message : 'Backend restart failed')
+    } finally {
+      setRestarting(false)
+    }
+  }, [restarting])
   const dot = (ok: unknown) => (
     <span className="inline-block rounded-full shrink-0" style={{
       width: 8, height: 8,
@@ -110,10 +127,27 @@ export default function BackendPage({ send, subscribe, connected, renderActive, 
             Live runtime status and server diagnostics.
           </p>
         </div>
+        {!connected && window.amadeus && (
+          <button
+            type="button"
+            onClick={() => void restartBackend()}
+            disabled={restarting}
+            className="shrink-0 disabled:opacity-50"
+            style={{ ...actionButtonStyle, cursor: restarting ? 'wait' : 'pointer' }}
+          >
+            {restarting ? 'Restarting…' : 'Restart backend'}
+          </button>
+        )}
         <span className="inline-flex items-center gap-2 shrink-0" style={{ height: 29, color: statusColor, fontSize: 11, fontWeight: 650 }}>
           {dot(connected)} {connected ? 'Connected' : 'Offline'}
         </span>
       </header>
+
+      {restartStatus && (
+        <div role="status" style={{ margin: '-4px 0 10px', color: 'var(--muted)', fontSize: 10.5 }}>
+          {restartStatus}
+        </div>
+      )}
 
       <div className="flex items-center flex-wrap gap-1.5 shrink-0" style={{ marginBottom: 10 }}>
         {statusChip('VTS', status.vts_connected)}

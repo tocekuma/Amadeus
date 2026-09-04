@@ -170,6 +170,36 @@ cd ..
 `torch==2.5.1+cu124`、`torchaudio==2.5.1+cu124` 和本地模型依赖集；它以当前
 实际运行环境为第一版基线。
 
+### Apple Silicon macOS 本地语音
+
+M1/M2/M3/M4 Mac 使用独立的 `.venv-macos-voice` 环境。GPT-SoVITS 默认走
+MPS，Qwen3-ASR 默认走 CPU；建议至少 32 GiB 统一内存。本机 M1 Max 实测首次
+启动约 18 秒完成角色语音加载与预热，后续短句无需重复承担 Metal 编译时间。
+
+```bash
+brew install ffmpeg portaudio
+uv venv --python 3.12 .venv-macos-voice
+source .venv-macos-voice/bin/activate
+python -m pip install --upgrade pip==26.2 setuptools==83.0.0 wheel==0.47.0
+PKG_CONFIG_PATH="$(brew --prefix portaudio)/lib/pkgconfig" \
+  python -m pip install -e ".[voice,vad,local-cu124]"
+python tools/verify_python_environment.py \
+  --profile macos-voice --require-mps-device
+
+cd electron
+npm ci
+cd ..
+./script/build_and_run.sh --verify
+```
+
+Electron 会优先发现 `.venv-macos-voice`。`TTS_DEVICE=auto` 在 Apple Silicon
+上解析为 `mps`；如需排障，可临时设为 `cpu`。MPS 默认单并发并执行一次短句
+预热，避免统一内存竞争和首次对话卡顿。
+
+`--verify` 会构建并通过 macOS LaunchServices 启动应用，等待后端与主窗口就绪，
+随后通过认证 WebSocket 启动 Electron 桌面壁纸并确认首帧提交。日常启动可使用
+`./script/build_and_run.sh`；Codex 项目的 **Run** action 也指向同一入口。
+
 > **GeForce RTX 50 系（Blackwell，社区验证配置）**：本项目当前使用的
 > `torch==2.5.1+cu124` profile 不兼容 RTX 50 系，无法运行本地 CUDA
 > 语音模型。50 系用户需要更新 NVIDIA 驱动，并改用社区已验证可运行的
@@ -346,6 +376,12 @@ http://127.0.0.1:17777/wallpaper/lively/index.html
 `py -3.12 tools\run_wallpaper_engine_bridge.py` 并使用它打印的 `Lively URL`。
 详见 [Lively 入口说明](wallpaper/lively/README.md)。
 
+macOS 没有对应的 Lively/Wallpaper Engine 桌面宿主。点击 **Wallpaper** 后，
+Electron 会在主屏幕创建桌面层全场景窗口，并以独立透明窗口承载可交互 Canvas；
+辅助屏幕只显示配套背景。场景保持鼠标穿透，不会挡住 Finder 桌面图标。该能力
+目前属于社区实机验证候选，不构成正式 macOS 支持；依赖与 CI 由
+[#46](https://github.com/Code-Amadeus/Amadeus/pull/46) 承接，也不包含签名、公证或安装器。
+
 ## 配置所有权
 
 启动值优先级固定为：
@@ -370,6 +406,7 @@ Settings 不会回写 `.env`。普通模型、语音、麦克风、Provider/MCP�
 | 远程 DeepSeek Main Chat | 第一版默认 profile |
 | 远程 ASR / TTS | 显式兼容路径，不静默 fallback |
 | Electron installer | 尚未提供；当前从源码启动 |
+| macOS Electron 壁纸宿主 | 社区实机验证候选；主屏全场景、辅助屏背景，依赖/CI 由 #46 承接 |
 | Docker | 不是支持的桌面安装路径 |
 | SpriteForge 角色包 | 外部分发；缺包仍可启动 |
 | VTS | 默认关闭的兼容旁路 |

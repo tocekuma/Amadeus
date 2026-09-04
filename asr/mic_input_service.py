@@ -239,6 +239,7 @@ class MicInputService:
         probable_end_silence_ms: int = 0,
         on_probable_end: Callable[[np.ndarray], None] | None = None,
         on_probable_end_cancelled: Callable[[], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> np.ndarray | None:
         self.start()
         if vad_model is not None:
@@ -362,7 +363,9 @@ class MicInputService:
             return audio
 
         try:
-            while not self._stop_event.is_set():
+            while not self._stop_event.is_set() and not (
+                cancel_event is not None and cancel_event.is_set()
+            ):
                 now = time.monotonic()
                 if not speech_started and now >= speech_start_deadline:
                     break

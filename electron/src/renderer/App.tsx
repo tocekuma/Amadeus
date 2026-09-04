@@ -35,6 +35,8 @@ function AmadeusApp() {
   const [renderActive, setRenderActive] = useState(false)  // false=VTS, true=PixiJS
   const [wallpaperActive, setWallpaperActive] = useState(false)
   const [renderAssetUrl, setRenderAssetUrl] = useState('')
+  const [renderPending, setRenderPending] = useState(false)
+  const [runtimeNotice, setRuntimeNotice] = useState('')
 
   useEffect(() => {
     if (desktopProjection) return
@@ -75,30 +77,48 @@ function AmadeusApp() {
 
   // Toggle the supported VTS/PixiJS render projection.
   const handleToggleRender = useCallback(async () => {
+    if (renderPending) return
     const next = !renderActive
-    setRenderActive(next)
     setPage('chat')
+    setRenderPending(true)
+    setRuntimeNotice('')
 
-    if (next) {
-      if (wallpaperActive) {
-        try { await send('wallpaper.stop', {}) } catch {}
-        setWallpaperActive(false)
-      }
-      // Start PixiJS render mode
-      const backend = 'graph'
-      send('expression.set_backend', { backend }).catch(() => {})
-      // Start AssetServer and get the render page URL
-      try {
+    try {
+      if (next) {
+        if (wallpaperActive) {
+          await send('wallpaper.stop', {})
+          setWallpaperActive(false)
+        }
+        await send('expression.set_backend', { backend: 'graph' })
         const res = await send('render.start', {})
-        if (res?.url) setRenderAssetUrl(String(res.url))
-      } catch { /* AssetServer might already be running */ }
-    } else {
-      // Switch back to VTS
-      send('expression.set_backend', { backend: 'vts' }).catch(() => {})
-      send('render.stop', {}).catch(() => {})
+        const url = String(res?.url || '')
+        if (!url) throw new Error('Render backend returned no asset URL')
+        setRenderAssetUrl(url)
+        setRenderActive(true)
+      } else {
+        await send('expression.set_backend', { backend: 'vts' })
+        await send('render.stop', {})
+        setRenderActive(false)
+        setRenderAssetUrl('')
+      }
+    } catch (reason) {
+      setRenderActive(false)
       setRenderAssetUrl('')
+      setRuntimeNotice(
+        `Render could not start: ${reason instanceof Error ? reason.message : String(reason)}`,
+      )
+    } finally {
+      setRenderPending(false)
     }
-  }, [send, renderActive, wallpaperActive])
+  }, [send, renderActive, wallpaperActive, renderPending])
+
+  useEffect(() => {
+    if (connected || (!renderActive && !renderPending)) return
+    setRenderActive(false)
+    setRenderAssetUrl('')
+    setRenderPending(false)
+    setRuntimeNotice('Backend disconnected. Render was stopped.')
+  }, [connected, renderActive, renderPending])
 
   // Toggle the Electron Slice wallpaper projection.
   const handleToggleWallpaper = useCallback(async () => {
@@ -264,9 +284,27 @@ function AmadeusApp() {
       <Sidebar
         page={page} onNavigate={handleNavigate}
         renderActive={renderActive} wallpaperActive={wallpaperActive}
+        renderDisabled={!connected || renderPending}
         onToggleRender={handleToggleRender} onToggleWallpaper={handleToggleWallpaper}
       />
       <div className="flex-1 flex flex-col min-w-0" style={{ backgroundColor: 'var(--bg)' }}>
+        {runtimeNotice && (
+          <div
+            role="alert"
+            className="flex items-center shrink-0"
+            style={{ minHeight: 34, padding: '6px 12px', color: '#8A4100', backgroundColor: '#FFF4CE', borderBottom: '1px solid #F2C661', fontSize: 11 }}
+          >
+            <span className="flex-1">{runtimeNotice}</span>
+            <button
+              type="button"
+              aria-label="Dismiss runtime notice"
+              onClick={() => setRuntimeNotice('')}
+              style={{ border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 15 }}
+            >
+              ×
+            </button>
+          </div>
+        )}
         {page === 'chat' && <ChatPage send={send} subscribe={subscribe} connected={connected} renderActive={renderActive} renderAssetUrl={renderAssetUrl} />}
         {page === 'vn' && <VNPage send={send} subscribe={subscribe} connected={connected} />}
         {page === 'expressions' && <ExpressionPage send={send} subscribe={subscribe} />}

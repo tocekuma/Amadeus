@@ -319,6 +319,15 @@ and waits in place while wallpaper mode is off. Do not hard-code `17778` or
 `py -3.12 tools\run_wallpaper_engine_bridge.py` and use the printed `Lively URL`.
 See the [Lively entry guide](wallpaper/lively/README.md).
 
+macOS has no corresponding Lively/Wallpaper Engine desktop host. When
+**Wallpaper** is activated, Electron hosts the full scene on the primary
+display and uses a separate transparent window for the interactive Canvas;
+secondary displays receive matching backdrops only. The scene remains
+click-through so it does not block Finder desktop icons. This is a community
+real-device candidate, not an official macOS support claim. Dependency and CI
+work is tracked by [#46](https://github.com/Code-Amadeus/Amadeus/pull/46), and
+signing, notarization, and an installer are not included yet.
+
 ## Configuration ownership
 
 Startup values use one precedence order:
@@ -345,6 +354,7 @@ advanced diagnostics, experimental thresholds, and test-only flags remain in
 | Remote DeepSeek Main Chat | First-release default profile |
 | Remote ASR / TTS | Explicit compatibility path, never a silent fallback |
 | Electron installer | Not provided yet; launch from source |
+| macOS Electron wallpaper host | Community real-device candidate; full scene on the primary display and backdrops on secondary displays, with dependency/CI tracked by #46 |
 | Docker | Not a supported desktop installation path |
 | SpriteForge character pack | Externally distributed; source starts without it |
 | VTS | Disabled-by-default compatibility route |

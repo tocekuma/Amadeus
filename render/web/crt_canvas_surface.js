@@ -4871,6 +4871,7 @@
       },
       setPayload(payload) {
         const data = payload || {};
+        const hasIncomingContent = Object.keys(data).some((key) => !["action", "visible"].includes(key));
         rememberCurrentView();
         const hasWorkContext = own(data, "workContext");
         const hasTaskDock = own(data, "taskDock");
@@ -5081,7 +5082,7 @@
         }
         if (typeof data.expanded === "boolean") state.expanded = data.expanded;
         else if (typeof data.open === "boolean") state.expanded = data.open;
-        else if (data.visible !== false) state.expanded = true;
+        else if (data.visible === true || hasIncomingContent) state.expanded = true;
         if (data.visible === false || data.action === "fold") state.expanded = false;
         if (own(data, "permissionRequest")) {
           state.permissionRequest = normalizePermissionRequest(data.permissionRequest);
@@ -5108,7 +5109,9 @@
           state.preset = preservedView.preset;
           state.size = clampSize(preservedView.size);
         }
-        state.hasContent = data.visible === false ? state.hasContent : true;
+        if (data.visible !== false && (data.visible === true || hasIncomingContent)) {
+          state.hasContent = true;
+        }
         const ttlMs = Number(data.ttlMs || data.timeoutMs || 0);
         if (Number.isFinite(ttlMs) && ttlMs > 0) {
           lifecycleTimer = window.setTimeout(() => {

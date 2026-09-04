@@ -77,12 +77,26 @@ def test_verify_profile_ladder_is_a_strict_prefix_chain() -> None:
     # L1 ⊂ L2 ⊂ L3 ⊂ L4: each release profile verifies a strict superset of
     # the tier below it, mirroring the install extras base → voice → vad → local-cu124.
     ladder = vpe.PROFILE_TIER_IMPORTS
-    assert tuple(ladder) == ("cpu", "ci", "voice", "vad", "cu124")
+    release_ladder = tuple(name for name in ladder if name != "macos-voice")
+    assert release_ladder == ("cpu", "ci", "voice", "vad", "cu124")
     chain = [set(ladder[name]) for name in ("cpu", "voice", "vad", "cu124")]
     for lower, upper in zip(chain, chain[1:]):
         assert lower < upper
     assert set(vpe.VAD_IMPORTS) <= set(ladder["vad"]) - set(ladder["voice"])
     assert set(vpe.LOCAL_MODEL_IMPORTS) <= set(ladder["cu124"]) - set(ladder["vad"])
+    assert set(ladder["macos-voice"]) == set(ladder["cu124"])
+
+
+def test_local_model_torch_versions_remain_platform_specific() -> None:
+    dependencies = _pyproject_extras()["local-cu124"]
+    assert "torch==2.5.1; platform_system != 'Darwin'" in dependencies
+    assert "torchaudio==2.5.1; platform_system != 'Darwin'" in dependencies
+    assert "torch==2.6.0; platform_system == 'Darwin'" in dependencies
+    assert "torchaudio==2.6.0; platform_system == 'Darwin'" in dependencies
+
+    verifier = (ROOT / "tools" / "verify_python_environment.py").read_text(encoding="utf-8")
+    assert 'startswith("2.5.1")' in verifier
+    assert 'startswith("2.6.0")' in verifier
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required for the resolver smoke")

@@ -21,6 +21,15 @@
 (function () {
   "use strict";
 
+  function queryFlagEnabled(name) {
+    try {
+      const value = String(new URLSearchParams(window.location.search || "").get(name) || "").toLowerCase();
+      return value === "1" || value === "true" || value === "yes" || value === "on";
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // PixiJS Application
   // ---------------------------------------------------------------------------
@@ -63,6 +72,7 @@
       this._framesPerLoadSlice = 2;
       this._speechQuietBeforeSpeculativeMs = 900;
       this._speculativeLoadEpoch = 0;
+      this._lazyFrameSetWarmup = queryFlagEnabled("spriteLazyLoad");
       this._pinnedFrameLabels = new Set([
         "idle",
         "speaking_short",
@@ -125,6 +135,7 @@
       this.sprite.addChild(this._mouthOverlay);
       this._mouthConfigs = {};     // label → js_cfg
 
+      console.log("[SpriteRenderer] startup frame warmup:", this._lazyFrameSetWarmup ? "lazy" : "eager");
       this._startIdleTicker();
     }
 
@@ -221,6 +232,14 @@
       this._frameIntervals[emotion] = intervalMs;
     }
 
+    prefersWarmAutoTransitions() {
+      return this._lazyFrameSetWarmup;
+    }
+
+    isFrameSetWarm(emotion) {
+      return this._frameSetStates[emotion] === "warm";
+    }
+
     setClipConfig(emotion, config) {
       this._clipConfigs[emotion] = config;
     }
@@ -260,6 +279,7 @@
     }
 
     prefetchLabels(labels, priority = "interactive", options = {}) {
+      if (this._lazyFrameSetWarmup && priority === "ambient") return;
       const score = this._priorityScore(priority);
       if (!score) return;
       for (const label of labels || []) {
@@ -287,6 +307,7 @@
     }
 
     _initialFrameSetPriority(emotion) {
+      if (this._lazyFrameSetWarmup) return 0;
       if (this._pinnedFrameLabels.has(emotion)) return 100;
       if (this._warmFrameLabels.has(emotion)) return 65;
       return 0;
@@ -1357,8 +1378,20 @@
     }
 
     _nextAutoNode(fromId) {
-      const edges = (this.graph.edges || []).filter((e) => e.from === fromId && Number(e.prob || 0) > 0);
+      let edges = (this.graph.edges || []).filter((e) => e.from === fromId && Number(e.prob || 0) > 0);
       if (!edges.length) return fromId;
+      if (
+        this.sprite.prefersWarmAutoTransitions()
+        && !this.speechActive
+        && !this.pendingExpression
+        && !this.forcedNodeId
+      ) {
+        const warmEdges = edges.filter((edge) => {
+          const label = this._label(edge.to);
+          return edge.to === fromId || (label && this.sprite.isFrameSetWarm(label));
+        });
+        if (warmEdges.length) edges = warmEdges;
+      }
       const total = edges.reduce((sum, e) => sum + Number(e.prob || 0), 0);
       let r = Math.random() * total;
       for (const edge of edges) {

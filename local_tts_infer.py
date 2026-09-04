@@ -8,6 +8,7 @@ import logging
 import tempfile
 import traceback
 import numpy as np
+from contextlib import nullcontext
 from pathlib import Path
 import string
 from string import punctuation
@@ -57,6 +58,16 @@ def _default_ref_free_prompt() -> str:
 # 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('tts_inference')
+
+
+def _uses_torch_cuda_device_api(device_name: str) -> bool:
+    """Return whether the device is addressed through torch.cuda (CUDA or HIP)."""
+    return device_name.startswith("cuda") and torch.cuda.is_available()
+
+
+def _allows_nvidia_cuda_extensions(uses_torch_cuda_api: bool) -> bool:
+    """NVIDIA CUDA extensions are incompatible with PyTorch ROCm/HIP builds."""
+    return uses_torch_cuda_api and not bool(getattr(torch.version, "hip", None))
 
 # 获取当前项目根目录
 root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -121,7 +132,21 @@ class TTSInferencer:
             base_dir = root_dir
             self.device = device
             device_name = str(device).lower()
-            self.is_half = torch.cuda.is_available() and device_name.startswith("cuda")
+            self._uses_torch_cuda_api = _uses_torch_cuda_device_api(device_name)
+            self._allows_nvidia_cuda_extensions = _allows_nvidia_cuda_extensions(
+                self._uses_torch_cuda_api
+            )
+            if device_name.startswith("cuda") and not self._uses_torch_cuda_api:
+                raise RuntimeError(
+                    f"TTS device {device!r} requires a usable PyTorch CUDA/HIP device"
+                )
+            if device_name.startswith("mps") and not (
+                hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+            ):
+                raise RuntimeError(
+                    f"TTS device {device!r} requires an available PyTorch MPS backend"
+                )
+            self.is_half = self._uses_torch_cuda_api
 
             # CUDA device index — used to set the current CUDA device before custom
             # CUDA kernel calls (BigVGAN's fused anti-alias activation), which rely on
@@ -205,14 +230,22 @@ class TTSInferencer:
         return effective
 
     def _sync_t2s_timing(self):
-        if self.is_half and str(self.device).lower().startswith("cuda") and torch.cuda.is_available():
-            with torch.cuda.device(self._tts_device_idx):
-                torch.cuda.synchronize()
+        self._synchronize_device()
 
     def _sync_sovits_timing(self):
-        if str(self.device).lower().startswith("cuda") and torch.cuda.is_available():
+        self._synchronize_device()
+
+    def _device_context(self):
+        if self._uses_torch_cuda_api:
+            return torch.cuda.device(self._tts_device_idx)
+        return nullcontext()
+
+    def _synchronize_device(self):
+        if self._uses_torch_cuda_api:
             with torch.cuda.device(self._tts_device_idx):
                 torch.cuda.synchronize()
+        elif str(self.device).lower().startswith("mps"):
+            torch.mps.synchronize()
 
     def _record_t2s_stat(
         self,
@@ -348,9 +381,14 @@ class TTSInferencer:
     def _warmup_bigvgan_runtime(self):
         if self.model_version != "v3" or self.bigvgan_model is None:
             return
+        default_buckets = (
+            "140,298"
+            if str(self.device).lower().startswith("mps")
+            else "64,70,73,80,90,100,106,110,120,128,178,256,298,512,598"
+        )
         raw_buckets = os.environ.get(
             "TTS_BIGVGAN_WARMUP_MELS",
-            "64,70,73,80,90,100,106,110,120,128,178,256,298,512,598",
+            default_buckets,
         )
         buckets = []
         for item in raw_buckets.split(","):
@@ -401,6 +439,48 @@ class TTSInferencer:
             logger.warning("[warmup] session cache warmup failed; continuing without it")
             logger.warning(traceback.format_exc())
 
+    def _warmup_mps_inference_runtime(self):
+        if not str(self.device).lower().startswith("mps"):
+            return
+        if os.environ.get("TTS_MPS_FULL_WARMUP", "1").strip().lower() in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }:
+            return
+        ref_audio_path, ref_text, lang = self._resolve_runtime_warmup_ref()
+        if not os.path.exists(ref_audio_path):
+            logger.info(f"[warmup] skip MPS inference: ref audio not found: {ref_audio_path}")
+            return
+        text = "This is a warmup test." if lang == "en" else "これはテストです。"
+        language = "英文" if lang == "en" else "日文"
+        try:
+            logger.info("[warmup] compiling MPS inference path")
+            self.infer(
+                text=text,
+                ref_audio_path=ref_audio_path,
+                prompt_text=ref_text,
+                text_language=language,
+                prompt_language=language,
+                how_to_cut="不切",
+                top_k=5,
+                top_p=1,
+                temperature=0.6,
+                speed=1.1,
+                sample_steps=4,
+                pause_second=0.05,
+                if_freeze=False,
+                if_sr=False,
+                enable_cuda_graph=False,
+                enable_static_kv=False,
+                max_sec_override=3.5,
+            )
+            self._synchronize_device()
+        except Exception:
+            logger.warning("[warmup] MPS inference warmup failed; continuing without it")
+            logger.warning(traceback.format_exc())
+
     def _warmup_runtime(self):
         if getattr(self, "_runtime_warmed", False):
             return
@@ -411,6 +491,7 @@ class TTSInferencer:
         logger.info("[warmup] TTS runtime warmup start")
         self._warmup_session_cache_runtime()
         self._warmup_bigvgan_runtime()
+        self._warmup_mps_inference_runtime()
         logger.info("[warmup] TTS runtime warmup done in %.2fs" % (time.perf_counter() - t0))
 
     def _init_language_dict(self):
@@ -496,7 +577,7 @@ class TTSInferencer:
         """加载GPT模型"""
 
         logger.info(f"Loading GPT model: {self.gpt_path}")
-        dict_s1 = torch.load(self.gpt_path, map_location="cpu")
+        dict_s1 = torch.load(self.gpt_path, map_location="cpu", weights_only=True)
         self.gpt_config = dict_s1["config"]
         self.hz = 50  # 默认值
         self.max_sec = self.gpt_config["data"]["max_sec"]
@@ -708,10 +789,10 @@ class TTSInferencer:
                 / "anti_alias_activation_cuda.pyd"
             )
             _use_cuda_kernel = False
-            if _cuda_pyd.exists():
+            if self._allows_nvidia_cuda_extensions and _cuda_pyd.exists():
                 _use_cuda_kernel = True
                 logger.info("[BigVGAN] compiled CUDA kernel cache found; loading directly")
-            else:
+            elif self._allows_nvidia_cuda_extensions:
                 try:
                     import subprocess as _sp
                     _nvcc = _sp.run(["nvcc", "--version"], capture_output=True, timeout=5)
@@ -720,26 +801,34 @@ class TTSInferencer:
                         logger.info("[BigVGAN] nvcc available; trying to compile the CUDA kernel")
                 except Exception:
                     logger.info("[BigVGAN] nvcc unavailable; using the PyTorch implementation")
+            elif self._uses_torch_cuda_api:
+                logger.info("[BigVGAN] ROCm/HIP device; using the PyTorch implementation")
+            else:
+                logger.info("[BigVGAN] non-CUDA device; using the PyTorch implementation")
 
             kernel_override = os.environ.get("BIGVGAN_USE_CUDA_KERNEL", "").strip().lower()
             if kernel_override in {"0", "false", "off", "no"}:
                 _use_cuda_kernel = False
                 logger.info("[BigVGAN] BIGVGAN_USE_CUDA_KERNEL=0, forcing PyTorch path")
             elif kernel_override in {"1", "true", "on", "yes"}:
-                _use_cuda_kernel = True
-                logger.info("[BigVGAN] BIGVGAN_USE_CUDA_KERNEL=1, forcing CUDA kernel path")
+                if self._allows_nvidia_cuda_extensions:
+                    _use_cuda_kernel = True
+                    logger.info("[BigVGAN] BIGVGAN_USE_CUDA_KERNEL=1, forcing CUDA kernel path")
+                else:
+                    _use_cuda_kernel = False
+                    logger.warning("[BigVGAN] CUDA kernels are unavailable on this TTS device; using PyTorch")
 
             # activation1d.py 在首次 import 时执行模块级 load.load()，
             # 若此时无设备上下文则 CUDA kernel 内部状态绑定到 cuda:0，
             # 之后模型移到 cuda:1 会触发 CUDNN_STATUS_MAPPING_ERROR。
             # 用 torch.cuda.device() 确保 kernel 初始化在正确设备上进行。
             try:
-                with torch.cuda.device(_tts_device_idx):
+                with self._device_context():
                     self.bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=_use_cuda_kernel)
             except Exception as _kernel_err:
                 if _use_cuda_kernel:
                     logger.warning(f"[BigVGAN] CUDA kernel compilation failed; falling back to PyTorch implementation: {_kernel_err}")
-                    with torch.cuda.device(_tts_device_idx):
+                    with self._device_context():
                         self.bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=False)
                 else:
                     raise
@@ -1336,7 +1425,7 @@ class TTSInferencer:
                     # torch.cuda.device() ensures at::cuda::getCurrentCUDAStream()
                     # inside the fused CUDA kernel uses the correct device stream,
                     # preventing CUDNN_STATUS_MAPPING_ERROR on non-default GPUs.
-                    with torch.cuda.device(self._tts_device_idx):
+                    with self._device_context():
                         with torch.inference_mode():
                             wav_gen = self.bigvgan_model(cmf_res)
                             audio = wav_gen[0][0]
@@ -1819,7 +1908,7 @@ class TTSInferencer:
                                 if self._sovits_sync_timing_enabled:
                                     self._sync_sovits_timing()
                                 _t1 = time.perf_counter()
-                                with torch.cuda.device(self._tts_device_idx):
+                                with self._device_context():
                                     with torch.inference_mode():
                                         wav_gen = self.bigvgan_model(chunk_mel)
                                         audio = wav_gen[0][0]
@@ -1876,7 +1965,7 @@ class TTSInferencer:
                             if self._sovits_sync_timing_enabled:
                                 self._sync_sovits_timing()
                             _t1 = time.perf_counter()
-                            with torch.cuda.device(self._tts_device_idx):
+                            with self._device_context():
                                 with torch.inference_mode():
                                     wav_gen = self.bigvgan_model(cmf_res)
                                     audio = wav_gen[0][0]
@@ -1889,8 +1978,7 @@ class TTSInferencer:
                                     cmf_res.shape[2],
                                 ))
                             else:
-                                if str(self.device) != "cpu":
-                                    torch.cuda.synchronize()
+                                self._synchronize_device()
                                 print("[sovits-timing] cfm=%.1fms  bigvgan=%.1fms  mel_T=%s" % (
                                     _t_cfm_total * 1000.0,
                                     (time.perf_counter() - _t1) * 1000.0,

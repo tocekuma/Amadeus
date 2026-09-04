@@ -80,13 +80,14 @@ class MicDeviceDescriptor:
 def classify_device(name: str, host_api: str = "") -> str:
     text = f"{name or ''} {host_api or ''}".lower()
     if (
-        "bluetooth" in text
-        or "hands-free" in text
-        or "handsfree" in text
+        any(part in text for part in _BLUETOOTH_MIC_PARTS)
         or re.search(r"\bbt\b", text)
     ):
         return "bluetooth"
-    if any(part in text for part in ("realtek", "internal", "内置", "microphone array")):
+    if (
+        any(part in text for part in (*_INTERNAL_MIC_PARTS, "realtek"))
+        or ("macbook" in text and "microphone" in text)
+    ):
         return "internal"
     if "usb" in text:
         return "usb"

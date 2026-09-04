@@ -11,6 +11,7 @@
 """
 
 import os
+import platform
 from pathlib import Path
 
 from config.environment import load_project_environment
@@ -280,8 +281,9 @@ MIMO_TTS_VOICE = _str("MIMO_TTS_VOICE", "冰糖")
 def _resolve_tts_device() -> str:
     """
     自动选择 TTS 设备：
-      - .env / 环境变量明确写了 cuda:0 / cuda:1 / cpu → 直接使用
-      - 未设置 / 写了 "cuda" / 写了 "auto" → 返回 "cuda:0"
+      - .env / 环境变量明确写了 cuda:0 / cuda:1 / mps / cpu → 直接使用
+      - 未设置 / 写了 "cuda" / 写了 "auto" → Apple Silicon 返回 MPS，
+        Intel macOS 返回 CPU，其他平台返回 cuda:0
 
     本地 LLM 的 endpoint 并不能证明它占用了哪张 GPU；多 GPU 分配必须由
     TTS_DEVICE 与 LOCAL_LLM_CUDA_VISIBLE_DEVICES 分别显式声明。
@@ -294,7 +296,10 @@ def _resolve_tts_device() -> str:
     if raw and raw not in ("cuda", "auto"):
         return raw
 
-    device = "cuda:0"
+    if platform.system() == "Darwin":
+        device = "mps" if platform.machine().lower() == "arm64" else "cpu"
+    else:
+        device = "cuda:0"
     # GPT-SoVITS/BigVGAN still reads TTS_DEVICE directly from the process
     # environment, so this compatibility write is part of the current contract.
     os.environ["TTS_DEVICE"] = device
@@ -314,7 +319,7 @@ TTS_OUTPUT_LANGUAGE   = _str("TTS_OUTPUT_LANGUAGE", "日文")
 # 日文管线参考音频 / 文本
 TTS_REF_AUDIO_JA = _str("TTS_REF_AUDIO_JA", "./assets/audio/reference/kurisu_reference.wav")
 TTS_REF_TEXT_JA  = _str("TTS_REF_TEXT_JA",
-    "そういえば,正式に自己紹介していませんでしたね……牧瀬紅莉栖です.改めてまして,よろしく")
+    "そういえば,まともに自己紹介していませんでしたね……牧瀬くりすです.改めまして,よろしく")
 
 # 英文管线参考音频 / 文本（请在 .env 中填写对应的英文参考文字）
 TTS_REF_AUDIO_EN = _str("TTS_REF_AUDIO_EN", "./assets/audio/reference/english_recording.wav")
@@ -328,7 +333,10 @@ TTS_RTF_INITIAL = _float("TTS_RTF_INITIAL", 0.6)
 TTS_CHARS_PER_SEC = _float("TTS_CHARS_PER_SEC", 7.5)
 SEGMENT_CHAR_LIMIT           = _int("SEGMENT_CHAR_LIMIT", 140)
 USE_EXPERIMENTAL_TTS_STREAM  = _bool("USE_EXPERIMENTAL_TTS_STREAM", True)
-EXP_TTS_MAX_CONCURRENCY      = _int("EXP_TTS_MAX_CONCURRENCY", 2)
+EXP_TTS_MAX_CONCURRENCY      = _int(
+    "EXP_TTS_MAX_CONCURRENCY",
+    1 if platform.system() == "Darwin" else 2,
+)
 USE_FIRST_SENTENCE_SPRINT    = _bool("USE_FIRST_SENTENCE_SPRINT", False)
 DISPLAY_FALLBACK_WINDOW_SEC  = _float("DISPLAY_FALLBACK_WINDOW_SEC", 1.5)
 PLAYBACK_PREWARM_AUDIO       = _bool("PLAYBACK_PREWARM_AUDIO", True)

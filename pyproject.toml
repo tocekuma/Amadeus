@@ -57,8 +57,10 @@ vad = [
 # flash-attn is deliberately absent: Qwen ASR already falls back to Torch SDPA,
 # while no reproducible Windows cp312 wheel exists in the supported install path.
 local-cu124 = [
-    "torch==2.5.1",
-    "torchaudio==2.5.1",
+    "torch==2.5.1; platform_system != 'Darwin'",
+    "torchaudio==2.5.1; platform_system != 'Darwin'",
+    "torch==2.6.0; platform_system == 'Darwin'",
+    "torchaudio==2.6.0; platform_system == 'Darwin'",
     "onnxruntime==1.26.0",
     "accelerate==1.12.0",
     "cn2an==0.5.24",

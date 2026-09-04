@@ -330,6 +330,7 @@
       return;
     }
     call = cloneCall(call);
+    observeFrameBudgetCall(call);
     const skipByFlag = {
       noCharacter: {
         setMode: true,
@@ -571,6 +572,61 @@
     } catch (e) { return null; }
   }
 
+  var _frameBudgetActiveUntil = Date.now() + 2500;
+  var _frameBudgetSpeaking = false;
+  var _frameBudgetWorkMode = false;
+  var _frameBudgetActivity = "";
+  var _frameBudgetLastFps = 0;
+
+  function frameBudgetConfiguredFps(name, fallback) {
+    var requested = Math.round(numberParam(name, fallback));
+    return requested >= 15 && requested <= 60 ? requested : fallback;
+  }
+
+  function refreshFrameBudget(reason) {
+    var pixiApp = getPixiApp();
+    var activeFps = frameBudgetConfiguredFps("targetFps", 0);
+    if (!pixiApp || !pixiApp.ticker || !activeFps) return;
+    var idleFps = frameBudgetConfiguredFps("idleFps", activeFps);
+    var active = _frameBudgetSpeaking || _frameBudgetWorkMode || !!_frameBudgetActivity
+      || Date.now() < _frameBudgetActiveUntil;
+    var requested = active ? activeFps : idleFps;
+    if (_frameBudgetLastFps === requested && pixiApp.ticker.maxFPS === requested) return;
+    pixiApp.ticker.maxFPS = requested;
+    _frameBudgetLastFps = requested;
+    clientLog("ticker.frame_budget", {
+      targetFps: requested,
+      mode: active ? "active" : "idle",
+      reason: reason || "timer",
+    });
+  }
+
+  function observeFrameBudgetCall(call) {
+    var method = String(call && call.method || "");
+    var firstArg = call && call.args ? call.args[0] : null;
+    if (method === "setSpeaking") {
+      _frameBudgetSpeaking = !!firstArg;
+    } else if (method === "setWorkMode") {
+      _frameBudgetWorkMode = !!firstArg;
+    } else if (method === "setActivity") {
+      _frameBudgetActivity = String(firstArg || "").trim();
+    }
+    if (
+      (method === "setSpeaking" && !!firstArg)
+      || (method === "setMouth" && Number(firstArg) > 0.03)
+      || method === "triggerSpriteForgeIntent"
+      || method === "setAttention"
+    ) {
+      _frameBudgetActiveUntil = Date.now() + 2500;
+    }
+    refreshFrameBudget("call:" + method);
+  }
+
+  function applyFrameBudget() {
+    refreshFrameBudget("startup");
+    setInterval(function () { refreshFrameBudget("timer"); }, 500);
+  }
+
   function restartTicker() {
     try {
       var pixiApp = getPixiApp();
@@ -779,6 +835,7 @@
     patchPixiOpaque();
     patchWallpaperRaf();
     patchTickerVisibility();
+    applyFrameBudget();
     installPixiTickerWatchdog();
     if (flagEnabled("debugSentinel")) installDomSentinel();
     if (flagEnabled("debugHeartbeat")) installAliveHeartbeat();

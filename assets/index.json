@@ -92,8 +92,7 @@
         "models/gpt-sovits/pretrained/models--nvidia--bigvgan_v2_24khz_100band_256x/bigvgan_generator.pt",
         "models/gpt-sovits/weights/gpt/v3/xxx-e15.ckpt",
         "models/gpt-sovits/weights/sovits/v3/xxx_e2_s174_l32.pth",
-        "audio/reference/kurisu_reference.wav",
-        "audio/reference/english_recording.wav"
+        "audio/reference/kurisu_reference.wav"
       ],
       "trees": [],
       "required": [
@@ -108,8 +107,7 @@
         "models/gpt-sovits/pretrained/models--nvidia--bigvgan_v2_24khz_100band_256x/bigvgan_generator.pt",
         "models/gpt-sovits/weights/gpt/v3/xxx-e15.ckpt",
         "models/gpt-sovits/weights/sovits/v3/xxx_e2_s174_l32.pth",
-        "audio/reference/kurisu_reference.wav",
-        "audio/reference/english_recording.wav"
+        "audio/reference/kurisu_reference.wav"
       ],
       "validator": "required_files"
     }

@@ -22,6 +22,7 @@ def test_classify_device_keywords():
     assert classify_device("BT Headset Microphone", "") == "bluetooth"
     assert classify_device("Realtek Microphone Array", "Windows WASAPI") == "internal"
     assert classify_device("内置麦克风", "") == "internal"
+    assert classify_device("MacBook Pro Microphone", "Core Audio") == "internal"
     assert classify_device("USB Audio Device", "DirectSound") == "usb"
     assert classify_device("Studio Capture", "DirectSound") == "unknown"
 

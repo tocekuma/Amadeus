@@ -193,6 +193,9 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
     title: string
   } | null>(null)
   const [asrListening, setAsrListening] = useState(false)
+  const [asrRequestPending, setAsrRequestPending] = useState(false)
+  const [asrStatusText, setAsrStatusText] = useState('')
+  const [asrError, setAsrError] = useState('')
   const [pixiSubmode, setPixiSubmode] = useState('graph')
   const [pendingVisualAttachment, setPendingVisualAttachment] = useState<VisualAttachment | null>(null)
   const [visionVideoMode, setVisionVideoMode] = useState(false)
@@ -607,17 +610,42 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
         if (p.source === 'wake') {
           setMessages(prev => [...prev, { role: 'user', text }])
           setAsrListening(false)
+          setAsrStatusText('')
           return
         }
         setInput(prev => prev ? `${prev} ${text}` : text)
         setAsrListening(false)
+        setAsrStatusText('')
       }
     }))
     unsubs.push(subscribe('asr.status', (p) => {
-      if (p.status === 'idle') setAsrListening(false)
+      const status = String(p.status || '')
+      if (status === 'loading') {
+        setAsrListening(true)
+        setAsrStatusText('Preparing microphone…')
+        setAsrError('')
+      } else if (status === 'listening' || status === 'awake') {
+        setAsrListening(true)
+        setAsrStatusText('Listening…')
+        setAsrError('')
+      } else if (status === 'error') {
+        setAsrListening(false)
+        setAsrStatusText('')
+        setAsrError(String(p.error || 'Microphone failed to start'))
+      } else if (status === 'idle' || status === 'unloaded') {
+        setAsrListening(false)
+        setAsrStatusText('')
+      }
     }))
     return () => unsubs.forEach(fn => fn())
   }, [subscribe, refreshSessions, upsertAssistantMessage, applySessionPayload, hydrateWorkActivities])
+
+  useEffect(() => {
+    if (connected) return
+    setAsrListening(false)
+    setAsrRequestPending(false)
+    setAsrStatusText('')
+  }, [connected])
 
   const handleSend = useCallback(async () => {
     const typedText = input.trim()
@@ -687,17 +715,35 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
   }, [handleSend])
 
   const handleMicToggle = useCallback(async () => {
-    if (!connected) return
+    if (!connected || asrRequestPending) return
+    const wasListening = asrListening
+    setAsrRequestPending(true)
+    setAsrError('')
     try {
-      if (asrListening) {
+      if (wasListening) {
+        setAsrStatusText('Stopping microphone…')
         await send('asr.stop', {})
         setAsrListening(false)
+        setAsrStatusText('')
       } else {
-        await send('asr.start', {})
+        // Immediate visual feedback also prevents a slow lazy model load from
+        // looking like a missed click.
         setAsrListening(true)
+        setAsrStatusText('Preparing microphone…')
+        const response = await send('asr.start', { one_shot: true, source: 'chat' })
+        if (response.status === 'error') {
+          throw new Error(String(response.error || 'Microphone failed to start'))
+        }
+        setAsrStatusText('Listening…')
       }
-    } catch { /* ignore */ }
-  }, [connected, send, asrListening])
+    } catch (reason) {
+      setAsrListening(wasListening)
+      setAsrStatusText(wasListening ? 'Listening…' : '')
+      setAsrError(reason instanceof Error ? reason.message : 'Microphone request failed')
+    } finally {
+      setAsrRequestPending(false)
+    }
+  }, [connected, send, asrListening, asrRequestPending])
 
   const clearVisionPressTimer = useCallback(() => {
     if (visionPressTimerRef.current !== null) {
@@ -1475,8 +1521,29 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
               </select>
               <div className="flex-1" />
 
+              {(asrStatusText || asrError) && (
+                <span
+                  role={asrError ? 'alert' : 'status'}
+                  style={{
+                    color: asrError ? '#C42B1C' : 'var(--faint)',
+                    fontSize: 10,
+                    maxWidth: 170,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                  title={asrError || asrStatusText}
+                >
+                  {asrError || asrStatusText}
+                </span>
+              )}
+
               <button onClick={handleMicToggle}
-                className="flex items-center justify-center shrink-0 cursor-pointer transition-colors" disabled={!connected}
+                type="button"
+                aria-label={asrRequestPending ? asrStatusText : asrListening ? 'Stop microphone' : 'Start microphone'}
+                title={asrRequestPending ? asrStatusText : asrListening ? 'Stop microphone' : 'Start microphone'}
+                className="flex items-center justify-center shrink-0 cursor-pointer transition-colors disabled:cursor-wait disabled:opacity-60"
+                disabled={!connected || asrRequestPending}
                 style={{
                   width: 36, height: 36, borderRadius: 18,
                   color: asrListening ? '#DC2626' : 'var(--muted)',
@@ -1485,12 +1552,12 @@ export default function ChatPage({ send, subscribe, connected, renderActive, ren
                   animation: asrListening ? 'pulse 1.5s ease-in-out infinite' : 'none',
                 }}
                 onMouseEnter={e => {
-                  if (!asrListening) {
+                  if (!asrListening && !asrRequestPending) {
                     const b = e.currentTarget; b.style.color = 'var(--text)'; b.style.backgroundColor = 'var(--hover)'; b.style.borderColor = 'var(--border-strong)'
                   }
                 }}
                 onMouseLeave={e => {
-                  if (!asrListening) {
+                  if (!asrListening && !asrRequestPending) {
                     const b = e.currentTarget; b.style.color = 'var(--muted)'; b.style.backgroundColor = 'transparent'; b.style.borderColor = 'var(--border)'
                   }
                 }}
